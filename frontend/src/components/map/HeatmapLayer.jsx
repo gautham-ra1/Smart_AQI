@@ -1,14 +1,20 @@
 import { useEffect, useRef } from "react";
 import { useMap } from "react-leaflet";
 import L from "leaflet";
-import { pm25ToCPCBColor } from "../../utils/aqiColors";
+import { pm25ToSmoothRGB } from "../../utils/aqiColors";
 
 /**
- * Renders the 50x50 NumPy/SciPy interpolated PM2.5 matrix onto an HTML5 Canvas
- * Leaflet ImageOverlay mapped strictly to India CPCB NAQI color bands.
- * Avoids Leaflet.heat point-density distortion.
+ * High-Resolution (512x512) HTML5 Canvas Leaflet ImageOverlay.
+ * Translucent CPCB color wash so underlying roads, rivers, and town names
+ * (Chikkamagaluru, Aldur, Balehonnur, Koppa, Sringeri) remain razor-sharp.
  */
-export default function HeatmapLayer({ gridPm25, gridStdDev, bounds, showUncertainty }) {
+export default function HeatmapLayer({
+  gridPm25,
+  gridStdDev,
+  bounds,
+  showUncertainty,
+  overlayOpacity = 0.45,
+}) {
   const map = useMap();
   const overlayRef = useRef(null);
 
@@ -27,18 +33,27 @@ export default function HeatmapLayer({ gridPm25, gridStdDev, bounds, showUncerta
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const pm25 = gridPm25[r][c];
-        const band = pm25ToCPCBColor(pm25);
-        const [red, green, blue] = band.rgb;
+        const idx = (r * cols + c) * 4;
 
-        // Modulate opacity by Kriging uncertainty if enabled (higher std_dev -> lower alpha)
-        let alpha = 148;
-        if (showUncertainty && gridStdDev && gridStdDev[r] && gridStdDev[r][c] != null) {
-          const std = Number(gridStdDev[r][c]);
-          const confidence = Math.max(0.28, Math.min(1.0, 1.0 - std / 24.0));
-          alpha = Math.round(180 * confidence);
+        // Empty pixel (unmonitored rural zone in ground_only mode)
+        if (pm25 == null) {
+          imgData.data[idx] = 0;
+          imgData.data[idx + 1] = 0;
+          imgData.data[idx + 2] = 0;
+          imgData.data[idx + 3] = 0;
+          continue;
         }
 
-        const idx = (r * cols + c) * 4;
+        const [red, green, blue] = pm25ToSmoothRGB(pm25);
+
+        let alpha = 210;
+        if (showUncertainty && gridStdDev && gridStdDev[r] && gridStdDev[r][c] != null) {
+          const std = Number(gridStdDev[r][c]);
+          // High confidence near ground/mobile sensors -> clearer tint; satellite-only -> softer tint
+          const confidence = Math.max(0.42, Math.min(1.0, 1.0 - std / 30.0));
+          alpha = Math.round(235 * confidence);
+        }
+
         imgData.data[idx] = red;
         imgData.data[idx + 1] = green;
         imgData.data[idx + 2] = blue;
@@ -48,14 +63,13 @@ export default function HeatmapLayer({ gridPm25, gridStdDev, bounds, showUncerta
 
     ctx.putImageData(imgData, 0, 0);
 
-    // Upscale smoothly onto a 250x250 canvas for crisp contour rendering
     const smoothCanvas = document.createElement("canvas");
-    smoothCanvas.width = 250;
-    smoothCanvas.height = 250;
+    smoothCanvas.width = 512;
+    smoothCanvas.height = 512;
     const sCtx = smoothCanvas.getContext("2d");
     sCtx.imageSmoothingEnabled = true;
     sCtx.imageSmoothingQuality = "high";
-    sCtx.drawImage(canvas, 0, 0, 250, 250);
+    sCtx.drawImage(canvas, 0, 0, 512, 512);
 
     const dataUrl = smoothCanvas.toDataURL("image/png");
     const leafletBounds = [
@@ -66,13 +80,14 @@ export default function HeatmapLayer({ gridPm25, gridStdDev, bounds, showUncerta
     if (overlayRef.current) {
       overlayRef.current.setUrl(dataUrl);
       overlayRef.current.setBounds(leafletBounds);
+      overlayRef.current.setOpacity(overlayOpacity);
     } else {
       overlayRef.current = L.imageOverlay(dataUrl, leafletBounds, {
-        opacity: 0.78,
+        opacity: overlayOpacity,
         interactive: false,
       }).addTo(map);
     }
-  }, [gridPm25, gridStdDev, bounds, showUncertainty, map]);
+  }, [gridPm25, gridStdDev, bounds, showUncertainty, overlayOpacity, map]);
 
   useEffect(() => {
     return () => {
