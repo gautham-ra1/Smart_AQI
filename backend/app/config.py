@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BACKEND_ENV_FILE = str(Path(__file__).resolve().parents[1] / ".env")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_BACKEND_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -28,6 +31,8 @@ class Settings(BaseSettings):
     API_KEY_PEPPER: str = "vayumesh-hmac-sha256-pepper-secret-2026"
 
     INGEST_RATE_LIMIT_PER_MIN: int = 12
+    INGEST_RATE_MIN_PER_MIN: int = 1
+    INGEST_GLOBAL_BUDGET_PER_MIN: int = 180
     INGEST_RATE_WINDOW_SEC: int = 60
 
     DATA_GOV_API_KEY: str = ""

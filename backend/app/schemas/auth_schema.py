@@ -65,6 +65,7 @@ class SensorIngestPayload(BaseModel):
 class FaultInjectionRequest(BaseModel):
     sensor_id: str | None = None
     city: str = "chikkamagaluru"
+    count: int = Field(3, ge=1, le=10)
     bias_pm25: float = Field(150.0, ge=20.0, le=500.0)
     ticks: int = Field(10, ge=1, le=20)
     rh_pct: float = Field(55.0, ge=0.0, le=100.0)

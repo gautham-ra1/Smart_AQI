@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import random
 import uuid
 from datetime import datetime, timezone
 
@@ -12,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppError, success_response
 from app.core.permissions import require_roles
 from app.core.security import generate_raw_api_key, hash_api_key
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.engines.ingestion_engine import process_sensor_reading
+from app.integrations.official_sync import sync_official_stations_live
 from app.models.reading import RawReading
 from app.models.sensor import Sensor
 from app.models.trust_log import TrustLog
@@ -72,53 +75,66 @@ async def inject_faulty_sensor(
     admin: User = Depends(admin_guard),
     db: AsyncSession = Depends(get_db),
 ):
-    """Live demo control: inject persistent +bias PM2.5 ticks to watch EWMA trust decay 0.75 -> 0.05."""
-    sensor = None
+    """Live demo control: randomly pick N non-official sensors (default 3) and inject +150 ug/m3 bias."""
+    targets: list[Sensor] = []
     if payload.sensor_id:
         try:
             sid = uuid.UUID(payload.sensor_id)
         except ValueError:
             raise AppError(400, "INVALID_SENSOR_ID", "Invalid sensor UUID.")
         res = await db.execute(select(Sensor).where(Sensor.id == sid))
-        sensor = res.scalar_one_or_none()
+        s = res.scalar_one_or_none()
+        if s:
+            targets = [s]
     else:
         res = await db.execute(
-            select(Sensor)
-            .where(
+            select(Sensor).where(
                 Sensor.city == payload.city.lower(),
                 Sensor.sensor_type != "official",
                 Sensor.status != "revoked",
             )
-            .order_by(desc(Sensor.trust_weight))
-            .limit(1)
         )
-        sensor = res.scalar_one_or_none()
+        candidates = list(res.scalars().all())
+        healthy = [c for c in candidates if float(c.trust_weight) >= 0.45]
+        pool = healthy if len(healthy) >= payload.count else candidates
+        targets = random.sample(pool, min(payload.count, len(pool))) if pool else []
 
-    if not sensor:
-        raise AppError(404, "NO_TARGET_SENSOR", "No non-official sensor available for fault injection.")
+    if not targets:
+        raise AppError(404, "NO_TARGET_SENSOR", "No non-official sensors available for fault injection.")
 
-    # Determine baseline near official station
     base_pm25 = 28.0
-    trajectory: list[dict] = []
-    for tick in range(1, payload.ticks + 1):
-        res_tick = await process_sensor_reading(
-            db=db,
-            sensor=sensor,
-            pm25_raw=min(990.0, base_pm25 + payload.bias_pm25),
-            rh_pct=payload.rh_pct,
-            lat=sensor.lat,
-            lon=sensor.lon,
-            recorded_at=datetime.now(timezone.utc),
-            broadcast=True,
-        )
-        trajectory.append(
+    injected_results: list[dict] = []
+
+    for sensor in targets:
+        trajectory: list[dict] = []
+        for tick in range(1, payload.ticks + 1):
+            res_tick = await process_sensor_reading(
+                db=db,
+                sensor=sensor,
+                pm25_raw=min(990.0, base_pm25 + payload.bias_pm25),
+                rh_pct=payload.rh_pct,
+                lat=sensor.lat,
+                lon=sensor.lon,
+                recorded_at=datetime.now(timezone.utc),
+                broadcast=False,
+            )
+            trajectory.append(
+                {
+                    "tick": tick,
+                    "pm25_raw": res_tick["pm25_raw"],
+                    "pm25_corrected": res_tick["pm25_corrected"],
+                    "new_trust": res_tick["new_trust"],
+                    "tier_used": res_tick["tier_used"],
+                    "status": res_tick["status"],
+                }
+            )
+        injected_results.append(
             {
-                "tick": tick,
-                "pm25_raw": res_tick["pm25_raw"],
-                "pm25_corrected": res_tick["pm25_corrected"],
-                "new_trust": res_tick["new_trust"],
-                "tier_used": res_tick["tier_used"],
-                "status": res_tick["status"],
+                "sensor_id": str(sensor.id),
+                "sensor_name": sensor.name,
+                "final_trust": round(float(sensor.trust_weight), 4),
+                "final_status": sensor.status,
+                "trajectory": trajectory,
             }
         )
 
@@ -126,26 +142,71 @@ async def inject_faulty_sensor(
         AuditLog(
             actor_id=admin.id,
             actor_email=admin.email,
-            action="INJECT_FAULTY_SENSOR",
-            target_type="sensor",
-            target_id=str(sensor.id),
-            details={"bias_pm25": payload.bias_pm25, "ticks": payload.ticks, "final_trust": sensor.trust_weight},
+            action="INJECT_FAULTY_SENSORS_BATCH",
+            target_type="city",
+            target_id=payload.city.lower(),
+            details={
+                "count": len(injected_results),
+                "bias_pm25": payload.bias_pm25,
+                "ticks": payload.ticks,
+                "sensors": [r["sensor_name"] for r in injected_results],
+            },
         )
     )
     await db.commit()
 
-    # Recompute and broadcast updated grid so connected UI sees false hotspot vanish
     grid = await compute_city_heatmap(
-        db=db, city=sensor.city, mode="kriging", persist=True, broadcast=True
+        db=db, city=payload.city.lower(), mode="kriging", persist=True, broadcast=True
     )
 
+    # Schedule automatic 3-tick recovery back to normal so demo sensors self-heal transparently
+    sensor_ids_to_restore = [uuid.UUID(r["sensor_id"]) for r in injected_results]
+    city_to_restore = payload.city.lower()
+
+    async def _auto_restore_after_3_ticks() -> None:
+        # Hold quarantined state briefly so judges see the 0.05 drop clearly, then recover over 3 ticks
+        await asyncio.sleep(8.0)
+        for recovery_tick in range(1, 4):
+            try:
+                async with AsyncSessionLocal() as rec_db:
+                    for sid in sensor_ids_to_restore:
+                        s_res = await rec_db.execute(select(Sensor).where(Sensor.id == sid))
+                        s_obj = s_res.scalar_one_or_none()
+                        if not s_obj:
+                            continue
+                        # Feed clean healthy reading matching local baseline (~14-20 ug/m3)
+                        clean_pm25 = round(random.uniform(13.0, 20.0), 2)
+                        await process_sensor_reading(
+                            db=rec_db,
+                            sensor=s_obj,
+                            pm25_raw=clean_pm25,
+                            rh_pct=65.0,
+                            lat=s_obj.lat,
+                            lon=s_obj.lon,
+                            recorded_at=datetime.now(timezone.utc),
+                            broadcast=True,
+                        )
+                    await compute_city_heatmap(
+                        db=rec_db, city=city_to_restore, mode="kriging", persist=False, broadcast=True
+                    )
+            except Exception:
+                pass
+            if recovery_tick < 3:
+                await asyncio.sleep(5.0)
+
+    asyncio.create_task(_auto_restore_after_3_ticks())
+
+    first = injected_results[0]
     return success_response(
         {
-            "sensor_id": str(sensor.id),
-            "sensor_name": sensor.name,
-            "final_trust": round(float(sensor.trust_weight), 4),
-            "final_status": sensor.status,
-            "trajectory": trajectory,
+            "sensor_id": first["sensor_id"],
+            "sensor_name": first["sensor_name"],
+            "final_trust": first["final_trust"],
+            "final_status": first["final_status"],
+            "trajectory": first["trajectory"],
+            "injected_count": len(injected_results),
+            "injected_sensors": injected_results,
+            "auto_restore_ticks": 3,
             "grid_compute_ms": grid["compute_ms"],
         }
     )
@@ -254,4 +315,49 @@ async def system_overview(
             "quarantined_sensors": quarantined_count,
             "immutable_raw_readings": readings_count,
         }
+    )
+
+
+@router.post("/sync-official")
+async def sync_official_live(
+    city: str = Query(default="chikkamagaluru"),
+    admin: User = Depends(admin_guard),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pull live official government monitor telemetry (CPCB data.gov.in -> OpenAQ v3 -> Open-Meteo CAMS)."""
+    synced = await sync_official_stations_live(db=db, city=city)
+    db.add(
+        AuditLog(
+            actor_id=admin.id,
+            actor_email=admin.email,
+            action="SYNC_OFFICIAL_LIVE",
+            target_type="city",
+            target_id=city,
+            details={"synced_count": len(synced), "sources": [s.get("live_source") for s in synced]},
+        )
+    )
+    await db.commit()
+    return success_response({"synced_count": len(synced), "stations": synced})
+
+
+@router.get("/users")
+async def list_users(
+    _admin: User = Depends(admin_guard),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await db.execute(select(User).order_by(desc(User.created_at)).limit(100))
+    users = res.scalars().all()
+    return success_response(
+        [
+            {
+                "id": str(u.id),
+                "email": u.email,
+                "full_name": u.full_name,
+                "role": u.role,
+                "health_profile": u.health_profile,
+                "is_active": u.is_active,
+                "created_at": u.created_at.isoformat(),
+            }
+            for u in users
+        ]
     )
