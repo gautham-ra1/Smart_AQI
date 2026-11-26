@@ -96,3 +96,13 @@ def test_official_station_always_fixed_1_0():
     assert res.new_trust == 1.0
     assert res.tier_used == "official"
     assert res.pm25_corrected == 95.0
+
+
+def test_adaptive_fleet_rate_limiter_scaling():
+    """Verify per-device rate limit scales from 12/min (sparse fleet) down to 1/min (dense fleet)."""
+    from app.core.rate_limiter import RateLimiter
+
+    assert RateLimiter.compute_dynamic_limit(active_devices=10, global_budget=180) == 12
+    assert RateLimiter.compute_dynamic_limit(active_devices=30, global_budget=180) == 6
+    assert RateLimiter.compute_dynamic_limit(active_devices=60, global_budget=180) == 3
+    assert RateLimiter.compute_dynamic_limit(active_devices=250, global_budget=180) == 1
