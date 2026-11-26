@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError, success_response
@@ -29,16 +29,23 @@ async def ingest_reading(
 
     key_hash = hash_api_key(x_api_key.strip())
 
-    # 1. Per-key sliding-window rate limit (Constraint 1: 12 req/min -> HTTP 429)
-    rl_info = await rate_limiter.enforce_ingest_limit(key_hash)
-
-    # 2. Authenticate hashed API key against sensors table
+    # 1. Authenticate hashed API key against sensors table
     res = await db.execute(select(Sensor).where(Sensor.api_key_hash == key_hash))
     sensor = res.scalar_one_or_none()
     if not sensor:
         raise AppError(401, "INVALID_API_KEY", "Unrecognized sensor API key.")
     if sensor.status == "revoked":
         raise AppError(403, "SENSOR_REVOKED", "This sensor API key has been revoked.")
+
+    # 2. Fleet-aware adaptive sliding-window rate limit (scales down to 1 req/min as fleet grows)
+    active_count = (
+        await db.execute(
+            select(func.count(Sensor.id)).where(
+                Sensor.city == sensor.city, Sensor.status != "revoked"
+            )
+        )
+    ).scalar_one()
+    rl_info = await rate_limiter.enforce_ingest_limit(key_hash, active_devices=active_count)
 
     # 3. Process immutable raw write + RH correction + Two-Tier EWMA trust update
     result = await process_sensor_reading(

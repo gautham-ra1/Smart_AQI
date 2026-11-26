@@ -10,7 +10,7 @@ from app.core.exceptions import success_response
 from app.database import get_db
 from app.models.aqi_grid import AQIGrid
 from app.services.heatmap_service import compute_city_heatmap, estimate_point_pm25
-from app.utils.geo_utils import CITY_CONFIGS
+from app.utils.geo_utils import CITY_CONFIGS, QUICK_ZONES
 
 router = APIRouter(prefix="/api/v1", tags=["Heatmap & AQI"])
 
@@ -18,10 +18,7 @@ router = APIRouter(prefix="/api/v1", tags=["Heatmap & AQI"])
 @router.get("/cities")
 async def list_cities():
     return success_response(
-        [
-            {"key": key, **cfg}
-            for key, cfg in CITY_CONFIGS.items()
-        ]
+        [{"key": key, "quick_zones": QUICK_ZONES, **cfg} for key, cfg in CITY_CONFIGS.items()]
     )
 
 
@@ -29,13 +26,15 @@ async def list_cities():
 async def get_heatmap(
     city: str = Query(default="chikkamagaluru"),
     mode: str = Query(default="kriging", pattern="^(idw|kriging)$"),
-    grid_size: int = Query(default=50, ge=15, le=80),
+    fusion_mode: str = Query(default="hybrid", pattern="^(hybrid|ground_only)$"),
+    grid_size: int = Query(default=80, ge=20, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     data = await compute_city_heatmap(
         db=db,
         city=city,
         mode=mode,
+        fusion_mode=fusion_mode,
         grid_size=grid_size,
         persist=False,
         broadcast=False,
@@ -57,7 +56,7 @@ async def get_point_aqi(
 @router.get("/aqi/history")
 async def get_aqi_history(
     city: str = Query(default="chikkamagaluru"),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=30, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     res = await db.execute(
@@ -74,6 +73,7 @@ async def get_aqi_history(
                 "city": g.city,
                 "mode": g.mode,
                 "requested_mode": g.requested_mode,
+                "grid_size": g.grid_size,
                 "active_sensor_count": g.active_sensor_count,
                 "compute_ms": g.compute_ms,
                 "source_timestamp": g.source_timestamp.isoformat(),

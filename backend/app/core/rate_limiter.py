@@ -42,13 +42,33 @@ class RateLimiter:
                 return None
         return self._redis
 
+    @staticmethod
+    def compute_dynamic_limit(
+        active_devices: int,
+        global_budget: int | None = None,
+        min_limit: int | None = None,
+        max_limit: int | None = None,
+    ) -> int:
+        """Adaptive fleet-aware per-device rate limit: clip(floor(budget / N_active), min, max)."""
+        budget = global_budget if global_budget is not None else settings.INGEST_GLOBAL_BUDGET_PER_MIN
+        lo = min_limit if min_limit is not None else settings.INGEST_RATE_MIN_PER_MIN
+        hi = max_limit if max_limit is not None else settings.INGEST_RATE_LIMIT_PER_MIN
+        n = max(1, int(active_devices))
+        return max(lo, min(hi, budget // n))
+
     async def enforce_ingest_limit(
         self,
         key_hash: str,
         limit: int | None = None,
         window_sec: int | None = None,
+        active_devices: int | None = None,
     ) -> dict:
-        max_req = limit or settings.INGEST_RATE_LIMIT_PER_MIN
+        if limit is not None:
+            max_req = limit
+        elif active_devices is not None:
+            max_req = self.compute_dynamic_limit(active_devices)
+        else:
+            max_req = settings.INGEST_RATE_LIMIT_PER_MIN
         window = window_sec or settings.INGEST_RATE_WINDOW_SEC
         now = time.time()
 
@@ -72,10 +92,22 @@ class RateLimiter:
             raise AppError(
                 status_code=429,
                 code="RATE_LIMIT_EXCEEDED",
-                message=f"Sensor ingest rate limit exceeded ({max_req} req/{window}s).",
-                details={"limit": max_req, "window_sec": window, "retry_after_sec": window},
+                message=f"Adaptive sensor rate limit exceeded ({max_req} req/{window}s for {active_devices or 1} active devices).",
+                details={
+                    "limit": max_req,
+                    "active_devices": active_devices,
+                    "global_budget_per_min": settings.INGEST_GLOBAL_BUDGET_PER_MIN,
+                    "window_sec": window,
+                    "retry_after_sec": window,
+                },
             )
-        return {"remaining": max(0, max_req - count), "limit": max_req, "window_sec": window}
+        return {
+            "remaining": max(0, max_req - count),
+            "limit": max_req,
+            "active_devices": active_devices,
+            "global_budget_per_min": settings.INGEST_GLOBAL_BUDGET_PER_MIN,
+            "window_sec": window,
+        }
 
     def _check_memory(self, key_hash: str, now: float, window: int) -> int:
         q = self._memory_windows[key_hash]
