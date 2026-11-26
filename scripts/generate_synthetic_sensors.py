@@ -38,7 +38,9 @@ MOBILE_ROUTES = {
 }
 
 
-async def run_virtual_iot_fleet(base_url: str, interval_sec: float, cycles: int) -> None:
+async def run_virtual_iot_fleet(
+    base_url: str, interval_sec: float, cycles: int, only: str = "all"
+) -> None:
     if not KEYS_FILE.exists():
         raise FileNotFoundError(
             f"{KEYS_FILE} not found. Run 'python scripts/seed_official_stations.py' first."
@@ -46,9 +48,15 @@ async def run_virtual_iot_fleet(base_url: str, interval_sec: float, cycles: int)
 
     config = json.loads(KEYS_FILE.read_text())
     devices = config["devices"]
+    if only == "static":
+        devices = [d for d in devices if d["sensor_type"] != "mobile_fleet"]
+    elif only == "mobile":
+        devices = [d for d in devices if d["sensor_type"] == "mobile_fleet"]
     step = 0
 
-    print(f"[VayuMesh Virtual IoT Fleet] Streaming {len(devices)} Chikkamagaluru devices -> {base_url}/api/v1/ingest")
+    print(
+        f"[VayuMesh Virtual IoT Fleet ({only})] Streaming {len(devices)} devices -> {base_url}/api/v1/ingest"
+    )
     async with httpx.AsyncClient(timeout=8.0) as client:
         while cycles == 0 or step < cycles:
             step += 1
@@ -109,8 +117,14 @@ def main() -> None:
     parser.add_argument("--url", default="http://localhost:8000", help="Backend API base URL")
     parser.add_argument("--interval", type=float, default=6.0, help="Seconds between telemetry ticks")
     parser.add_argument("--cycles", type=int, default=0, help="Number of cycles (0 = infinite)")
+    parser.add_argument(
+        "--only",
+        choices=["all", "static", "mobile"],
+        default="all",
+        help="Filter which device subset this laptop simulates (use 'static' on Member 2's laptop)",
+    )
     args = parser.parse_args()
-    asyncio.run(run_virtual_iot_fleet(args.url, args.interval, args.cycles))
+    asyncio.run(run_virtual_iot_fleet(args.url, args.interval, args.cycles, args.only))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,214 @@
+{
+  "info": {
+    "name": "VayuMesh — Hyperlocal AQI Sensor Fusion API",
+    "description": "Ready-to-run Postman collection for VayuMesh (Chikkamagaluru – Sringeri Corridor). Includes auto-saved JWT tokens and sensor API key chaining.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "admin_token", "value": "" },
+    { "key": "citizen_token", "value": "" },
+    { "key": "sensor_api_key", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. System Health",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/health"
+      }
+    },
+    {
+      "name": "2. Auth — Admin Login (Auto-Saves admin_token)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const res = pm.response.json();",
+              "if (res.success && res.data.access_token) {",
+              "  pm.collectionVariables.set('admin_token', res.data.access_token);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"admin@vayumesh.in\",\n  \"password\": \"Admin@123\"\n}"
+        },
+        "url": "{{base_url}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "3. Auth — Citizen Login (Auto-Saves citizen_token)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const res = pm.response.json();",
+              "if (res.success && res.data.access_token) {",
+              "  pm.collectionVariables.set('citizen_token', res.data.access_token);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"citizen@vayumesh.in\",\n  \"password\": \"Citizen@123\"\n}"
+        },
+        "url": "{{base_url}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "4. RBAC Proof — Citizen Blocked on Admin Recompute (403)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{citizen_token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"city\": \"chikkamagaluru\",\n  \"mode\": \"kriging\"\n}"
+        },
+        "url": "{{base_url}}/api/v1/admin/recompute"
+      }
+    },
+    {
+      "name": "5. Sensors — Register Sensor (Auto-Saves One-Time API Key)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const res = pm.response.json();",
+              "if (res.success && res.data.api_key) {",
+              "  pm.collectionVariables.set('sensor_api_key', res.data.api_key);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{citizen_token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Postman Sringeri Test PMS5003\",\n  \"city\": \"chikkamagaluru\",\n  \"sensor_type\": \"citizen_fixed\",\n  \"lat\": 13.4198,\n  \"lon\": 75.2528\n}"
+        },
+        "url": "{{base_url}}/api/v1/sensors/register"
+      }
+    },
+    {
+      "name": "6. Ingest — Valid High-RH Monsoon Reading (201)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{sensor_api_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pm25\": 45.0,\n  \"pm10\": 68.0,\n  \"rh_pct\": 90.0,\n  \"temp_c\": 21.5,\n  \"lat\": 13.4198,\n  \"lon\": 75.2528\n}"
+        },
+        "url": "{{base_url}}/api/v1/ingest"
+      }
+    },
+    {
+      "name": "7. Ingest — Sanity Check Rejection PM2.5=2500 (422)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{sensor_api_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pm25\": 2500.0,\n  \"rh_pct\": 60.0,\n  \"lat\": 13.4198,\n  \"lon\": 75.2528\n}"
+        },
+        "url": "{{base_url}}/api/v1/ingest"
+      }
+    },
+    {
+      "name": "8. Heatmap — Hybrid Satellite + Ground (80x80 Kriging)",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/v1/heatmap?city=chikkamagaluru&mode=kriging&fusion_mode=hybrid&grid_size=80"
+      }
+    },
+    {
+      "name": "9. Heatmap — Ground Only (Shows Empty Pixels)",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/v1/heatmap?city=chikkamagaluru&mode=kriging&fusion_mode=ground_only&grid_size=80"
+      }
+    },
+    {
+      "name": "10. Point AQI — Click Sringeri Sharada Peetham",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/v1/aqi/point?lat=13.4198&lon=75.2528&city=chikkamagaluru"
+      }
+    },
+    {
+      "name": "11. Health Advisory — Asthma Cohort (CPCB + MoHFW)",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/v1/advisories?profile=asthma&pm25=105"
+      }
+    },
+    {
+      "name": "12. Admin — Inject Fault on 3 Random Nodes (Auto-Restores)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"city\": \"chikkamagaluru\",\n  \"count\": 3,\n  \"bias_pm25\": 150.0,\n  \"ticks\": 10\n}"
+        },
+        "url": "{{base_url}}/api/v1/admin/fault-injection"
+      }
+    },
+    {
+      "name": "13. Admin — Sync Official CPCB / OpenAQ Live",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+        "url": "{{base_url}}/api/v1/admin/sync-official?city=chikkamagaluru"
+      }
+    },
+    {
+      "name": "14. Admin — Recompute 80x80 Grid from Immutable Logs",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"city\": \"chikkamagaluru\",\n  \"mode\": \"kriging\",\n  \"grid_size\": 80\n}"
+        },
+        "url": "{{base_url}}/api/v1/admin/recompute"
+      }
+    }
+  ]
+}
